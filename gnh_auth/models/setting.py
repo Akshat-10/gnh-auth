@@ -78,34 +78,44 @@ class ResConfigSettings(models.TransientModel):
         try:
             _logger.info("Sending request to: %s", f'{tcb_endpoint}/api/get_new_key')
             _logger.info("Request params: %s", params)
-            response = requests.post(f'{tcb_endpoint}/api/get_new_key', json=params)
+            response = requests.post(f'{tcb_endpoint}/api/get_new_key', json=params, timeout=10)
             _logger.info("Response status code: %s", response.status_code)
             _logger.info("Response content: %s", response.text)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            _logger.error("Failed to fetch the key from the external service: %s", e)
-            raise ValidationError(_("Failed to fetch the key from the external service"))
+            _logger.error("Failed to fetch the key from the external service: %s", str(e))
+            if isinstance(e, requests.exceptions.ConnectionError):
+                raise ValidationError(_("Unable to connect to the server. Please check the server URL and ensure it's accessible."))
+            elif isinstance(e, requests.exceptions.Timeout):
+                raise ValidationError(_("The request to the server timed out. Please try again later."))
+            elif isinstance(e, requests.exceptions.HTTPError):
+                if e.response.status_code == 404:
+                    raise ValidationError(_("The requested endpoint was not found on the server. Please check the server configuration."))
+                else:
+                    raise ValidationError(_("An HTTP error occurred: %s") % str(e))
+            else:
+                raise ValidationError(_("An unexpected error occurred: %s") % str(e))
 
-        data = response.json()
-        _logger.info("Parsed JSON data: %s", data)
-        _logger.info(" //////// Response data: %s", data)
+        try:
+            data = response.json()
+            _logger.info("Parsed JSON data: %s", data)
+        except ValueError:
+            _logger.error("Failed to parse JSON from response")
+            raise ValidationError(_("The server returned an invalid response. Please check the server logs."))
 
-        if response.status_code == 200:
-            self.env['ir.config_parameter'].sudo().set_param('gnh_auth.key', data.get('key'))
-            self.env['ir.config_parameter'].sudo().set_param('gnh_auth.validity_until', data.get('end_date'))
-            # _logger.info("Key and End Date: %s, %s", data.get('key'), data.get('end_date'))
-
-            # self.key = data.get('key')
-            self.validity_until = data.get('end_date')
-
-            _logger.info("self.key after assignment: %s", self.key)
-            _logger.info("self.validity_until after assignment: %s", self.validity_until)
-
-            print(" ///////// Data ---------->", data)
-            return data
+        if isinstance(data, list) and data:
+            result_item = data[0]
+            if 'key' in result_item and 'end_date' in result_item:
+                self.env['ir.config_parameter'].sudo().set_param('gnh_auth.key', result_item['key'])
+                self.env['ir.config_parameter'].sudo().set_param('gnh_auth.validity_until', result_item['end_date'])
+                self.key = result_item['key']
+                self.validity_until = result_item['end_date']
+                _logger.info("Key and validity set: %s, %s", self.key, self.validity_until)
+                return result_item
+            else:
+                raise ValidationError(_("Invalid data structure received from API."))
         else:
-            _logger.error("/// Failed to fetch the key from the external service //////")
-            return {}
+            raise ValidationError(_("No valid data received from API."))
 
         
 
